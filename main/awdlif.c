@@ -14,12 +14,15 @@
 
 #include "macros.h"
 
+static volatile int awdl_netif_idx = 0;
+
 err_t
 awdl_dns_lookup(const char *name, ip_addr_t *addr, u8_t dns_addrtype)
 {
 	printf("performing dns lookup for %s\n", name);
 	char *addrbuf = "fe80::1234:5678";
 	ipaddr_aton(addrbuf, addr);
+	ip6_addr_set_zone(ip_2_ip6(addr), awdl_netif_idx);
 	return ERR_OK;
 }
 
@@ -151,6 +154,8 @@ awdl_link_output(struct netif *netif, struct pbuf *p)
 	return ERR_OK;
 }
 
+char *mac_bytes = "\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c";
+
 err_t
 awdlif_init(struct netif *netif)
 {
@@ -159,9 +164,11 @@ awdlif_init(struct netif *netif)
   	netif->output_ip6 = awdl_output6;
  	netif->linkoutput = awdl_link_output;
   	netif->hwaddr_len = ETHARP_HWADDR_LEN;
+  	memcpy(netif->hwaddr, mac_bytes, ETHARP_HWADDR_LEN);
 	netif->mtu = 1500;
-  	netif->flags = NETIF_FLAG_BROADCAST | NETIF_FLAG_LINK_UP;
+  	netif->flags = NETIF_FLAG_BROADCAST | NETIF_FLAG_LINK_UP | NETIF_FLAG_ETHERNET;
   	netif_create_ip6_linklocal_address(netif, 1);
+  	netif_ip6_addr_set_state(netif, 0, IP6_ADDR_PREFERRED);
 	return ERR_OK;
 }
 
@@ -185,6 +192,8 @@ awdl_init()
 	netif_add(&state->netif, &state->ipaddr, &state->netmask, &state->gw, NULL, awdlif_init, tcpip_input);
 	netif_set_default(&state->netif);
 	netif_set_up(&state->netif);
+	netif_set_default(&state->netif);
+	awdl_netif_idx = netif_get_index(&state->netif);
 
     // init wifi
     printf("initializing wifi\n");
