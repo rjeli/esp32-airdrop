@@ -1,4 +1,5 @@
 #include <string.h>
+#include <math.h>
 #include "lwip/inet.h"
 #include "lwip/ip_addr.h"
 #include "lwip/ip6_addr.h"
@@ -55,6 +56,14 @@ lookup_dns_entry(uint8_t tag)
 	return NULL;
 }
 
+typedef struct {
+	uint32_t vals[16];
+	int pos;
+	SemaphoreHandle_t mtx;
+} wide_aw_offset_buf_t;
+
+static wide_aw_offset_buf_t *wawob;
+
 void
 wifi_pkt_handler(void *buf, wifi_promiscuous_pkt_type_t type)
 {
@@ -64,8 +73,12 @@ wifi_pkt_handler(void *buf, wifi_promiscuous_pkt_type_t type)
 	if (memcmp(&pkt->payload[24], &mgmt_params[0], sizeof(mgmt_params)-1)) return;
 	printf("got AWDL rssi: %d len: %u\n",
 		pkt->rx_ctrl.rssi, pkt->rx_ctrl.sig_len);
+	printf("  rx time: %u now: %llu\n", pkt->rx_ctrl.timestamp, esp_timer_get_time());
 	uint8_t *payload_end = &pkt->payload[pkt->rx_ctrl.sig_len];
 	uint8_t *fparams = &pkt->payload[28];
+	uint32_t phy_tx_time = *((uint32_t *) (fparams+4));
+	uint32_t tgt_tx_time = *((uint32_t *) (fparams+8));
+	printf("  phy_tx_t: %u tgt_txt_t: %u\n", phy_tx_time, tgt_tx_time);
 	uint8_t *tlvs = &pkt->payload[40];
 	uint8_t *tlv = tlvs;
 	while (tlv < payload_end) {
@@ -101,7 +114,30 @@ wifi_pkt_handler(void *buf, wifi_promiscuous_pkt_type_t type)
 				printf(".");
 			}
 			break;
-		ENUMCASE(AWDL_TAG_SYNC_PARAMS);
+		ENUMCASEO(AWDL_TAG_SYNC_PARAMS);
+			uint32_t remaining_tus = *((uint16_t *) (tlv_payload+15));
+			uint32_t next_aw_ts = pkt->rx_ctrl.timestamp + remaining_tus*1024 - (phy_tx_time-tgt_tx_time);
+			uint32_t next_aw_seqnum = *((uint16_t *) (tlv_payload+29)) + 1;
+			printf(" remaining_tus: %d next_aw_seqnum: %d", remaining_tus, next_aw_seqnum);
+			uint32_t next_aw_misalignment = next_aw_seqnum % 64;
+			uint32_t wide_aw_start = next_aw_ts - (next_aw_misalignment*1024*16);
+			uint32_t offset = wide_aw_start % (1024*16*64);
+			xSemaphoreTake(wawob->mtx, portMAX_DELAY);
+			wawob->vals[wawob->pos] = offset;
+			wawob->pos = (wawob->pos+1) % COUNTOF(wawob->vals);
+			double total = 0;
+			for (int i = 0; i < COUNTOF(wawob->vals); i++) {
+				total += wawob->vals[i];
+			}
+			double mean = total / COUNTOF(wawob->vals);
+			double sumsq = 0;
+			for (int i = 0; i < COUNTOF(wawob->vals); i++) {
+				sumsq += (wawob->vals[i]-mean)*(wawob->vals[i]-mean);
+			}
+			double stdev = sqrt(sumsq / COUNTOF(wawob->vals));
+			printf(" offset mean: %f stdev: %f", mean, stdev);
+			xSemaphoreGive(wawob->mtx);
+			break;
 		ENUMCASE(AWDL_TAG_SRV_PARAMS);
 		ENUMCASE(AWDL_TAG_CH_SEQ);
 		ENUMDEFAULT(tlv[0]);
@@ -181,6 +217,9 @@ void
 awdl_init()
 {
 	awdl_state_t *state = malloc(sizeof(awdl_state_t));
+	wawob = malloc(sizeof(*wawob));
+	wawob->pos = 0;
+	wawob->mtx = xSemaphoreCreateMutex();
 
 	printf("initializing awdl");
 	tcpip_init(NULL, NULL);
