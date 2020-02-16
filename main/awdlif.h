@@ -1,0 +1,1 @@
+void awdl_init();
