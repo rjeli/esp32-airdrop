@@ -13,7 +13,22 @@
 // #include "netif/etharp.h"
 #include "esp_wifi.h"
 
+#include "freertos/FreeRTOS.h"
+
 #include "macros.h"
+#include "utils.h"
+#include "khash.h"
+
+// tu = time unit
+// aw = availability window
+// awc = aw cycle
+
+#define TU_PER_AW 16
+#define AW_PER_AWC 64
+
+#define TU_US 1024
+#define AW_US (TU_US*TU_PER_AW)
+#define AWC_US (AW_US*AW_PER_AWC)
 
 static volatile int awdl_netif_idx = 0;
 
@@ -56,13 +71,26 @@ lookup_dns_entry(uint8_t tag)
 	return NULL;
 }
 
-typedef struct {
-	uint32_t vals[16];
-	int pos;
-	SemaphoreHandle_t mtx;
-} wide_aw_offset_buf_t;
+KHASH_MAP_INIT_INT64(masters, running_stats_t);
+static khash_t(masters) *masters;
+static SemaphoreHandle_t masters_mtx;
 
-static wide_aw_offset_buf_t *wawob;
+void
+update_master(uint8_t *addr, int32_t offset)
+{
+	xSemaphoreTake(masters_mtx, portMAX_DELAY);
+	uint64_t key = 0;
+	memcpy(&key, addr, 6);
+	int ret;
+	khiter_t k = kh_put(masters, masters, key, &ret);
+	running_stats_t *rs = &kh_value(masters, k);
+	if (ret > 0) {
+		// nonexistent or deleted
+		running_stats_init(rs, 16);
+	}
+	running_stats_update(rs, offset);
+	xSemaphoreGive(masters_mtx);
+}
 
 void
 wifi_pkt_handler(void *buf, wifi_promiscuous_pkt_type_t type)
@@ -71,27 +99,29 @@ wifi_pkt_handler(void *buf, wifi_promiscuous_pkt_type_t type)
 	if (pkt->payload[0] != 0xd0) return; // MGMT, ACTION frame
 	uint8_t mgmt_params[] = "\x7f\x00\x17\xf2"; // Vendor specific, Apple
 	if (memcmp(&pkt->payload[24], &mgmt_params[0], sizeof(mgmt_params)-1)) return;
-	printf("got AWDL rssi: %d len: %u\n",
-		pkt->rx_ctrl.rssi, pkt->rx_ctrl.sig_len);
-	printf("  rx time: %u now: %llu\n", pkt->rx_ctrl.timestamp, esp_timer_get_time());
+	uint8_t txaddr[6], masteraddr[6];
+	memcpy(&txaddr[0], &pkt->payload[10], 6);
+	// printf("got AWDL rssi: %d len: %u\n",
+		// pkt->rx_ctrl.rssi, pkt->rx_ctrl.sig_len);
+	// printf("  rx time: %u now: %llu\n", pkt->rx_ctrl.timestamp, esp_timer_get_time());
 	uint8_t *payload_end = &pkt->payload[pkt->rx_ctrl.sig_len];
 	uint8_t *fparams = &pkt->payload[28];
 	uint32_t phy_tx_time = *((uint32_t *) (fparams+4));
 	uint32_t tgt_tx_time = *((uint32_t *) (fparams+8));
-	printf("  phy_tx_t: %u tgt_txt_t: %u\n", phy_tx_time, tgt_tx_time);
+	// printf("  phy_tx_t: %u tgt_txt_t: %u\n", phy_tx_time, tgt_tx_time);
 	uint8_t *tlvs = &pkt->payload[40];
 	uint8_t *tlv = tlvs;
 	while (tlv < payload_end) {
 		uint16_t tlv_len = *((uint16_t *) (tlv+1));
-		printf("  tlv len: %u ", tlv_len);
+		// printf("  tlv len: %u ", tlv_len);
 		uint8_t *tlv_payload = tlv + 3;
 		switch (tlv[0]) {
 		ENUMCASEO(AWDL_TAG_SRV_RESP);
-			printf(" ");
+			// printf(" ");
 			uint8_t name_len = tlv_payload[0];
 			uint8_t name_len_unknown = tlv_payload[1];
 			if (name_len_unknown != 0) {
-				printf("byte after name_len not 0x00, not sure what to do\n");
+				// printf("byte after name_len not 0x00, not sure what to do\n");
 				break;
 			}
 			uint8_t *name_end = &tlv_payload[name_len+1];
@@ -100,50 +130,44 @@ wifi_pkt_handler(void *buf, wifi_promiscuous_pkt_type_t type)
 				if (name_literal[0] == 0xc0) {
 					char *dns = lookup_dns_entry(name_literal[1]);
 					if (dns) {
-						printf("%s", dns);
+						// printf("%s", dns);
 					} else {
-						printf("UNKNOWN(%u)", name_literal[1]);
+						// printf("UNKNOWN(%u)", name_literal[1]);
 					}
 					name_literal += 2;
 				} else {
 					for (int i = 0; i < name_literal[0]; i++) {
-						printf("%c", name_literal[i+1]);
+						// printf("%c", name_literal[i+1]);
 					}
 					name_literal += name_literal[0]+1;
 				}
-				printf(".");
+				// printf(".");
 			}
 			break;
 		ENUMCASEO(AWDL_TAG_SYNC_PARAMS);
-			uint32_t remaining_tus = *((uint16_t *) (tlv_payload+15));
-			uint32_t next_aw_ts = pkt->rx_ctrl.timestamp + remaining_tus*1024 - (phy_tx_time-tgt_tx_time);
-			uint32_t next_aw_seqnum = *((uint16_t *) (tlv_payload+29)) + 1;
-			printf(" remaining_tus: %d next_aw_seqnum: %d", remaining_tus, next_aw_seqnum);
-			uint32_t next_aw_misalignment = next_aw_seqnum % 64;
-			uint32_t wide_aw_start = next_aw_ts - (next_aw_misalignment*1024*16);
-			uint32_t offset = wide_aw_start % (1024*16*64);
-			xSemaphoreTake(wawob->mtx, portMAX_DELAY);
-			wawob->vals[wawob->pos] = offset;
-			wawob->pos = (wawob->pos+1) % COUNTOF(wawob->vals);
-			double total = 0;
-			for (int i = 0; i < COUNTOF(wawob->vals); i++) {
-				total += wawob->vals[i];
-			}
-			double mean = total / COUNTOF(wawob->vals);
-			double sumsq = 0;
-			for (int i = 0; i < COUNTOF(wawob->vals); i++) {
-				sumsq += (wawob->vals[i]-mean)*(wawob->vals[i]-mean);
-			}
-			double stdev = sqrt(sumsq / COUNTOF(wawob->vals));
-			printf(" offset mean: %f stdev: %f", mean, stdev);
-			xSemaphoreGive(wawob->mtx);
+			uint64_t remaining_tus = *((uint16_t *) (tlv_payload+15));
+			uint64_t next_aw_ts = pkt->rx_ctrl.timestamp + remaining_tus*TU_US - (phy_tx_time-tgt_tx_time);
+			uint64_t next_aw_seqnum = *((uint16_t *) (tlv_payload+29)) + 1;
+			// printf(" remaining_tus: %d next_aw_seqnum: %d", remaining_tus, next_aw_seqnum);
+			uint64_t next_aw_misalignment = next_aw_seqnum % AW_PER_AWC;
+			uint64_t awc_start = next_aw_ts - (next_aw_misalignment*AW_US);
+			uint64_t offset = awc_start % AWC_US;
+			memcpy(&masteraddr[0], tlv_payload+21, 6);
+			printf("update from ");
+			print_mac(txaddr);
+			printf(" master: ");
+			print_mac(masteraddr);
+			printf(" remaining_tus: %d next_aw: %d offset: %f\n", 
+				(int) remaining_tus, (int) next_aw_seqnum,
+				(double) offset);
+			update_master(masteraddr, offset);
 			break;
 		ENUMCASE(AWDL_TAG_SRV_PARAMS);
 		ENUMCASE(AWDL_TAG_CH_SEQ);
 		ENUMDEFAULT(tlv[0]);
 		}
 		tlv += tlv_len+3;
-		printf("\n");
+		// printf("\n");
 	}
 	// add_pcap_pkt(pkt->payload, pkt->rx_ctrl.sig_len, pkt->rx_ctrl.timestamp);
 }
@@ -214,12 +238,36 @@ typedef struct {
 } awdl_state_t;
 
 void
+print_awc_stats_task(void *params)
+{
+	float mean, stdev;
+	for (;;) {
+		int64_t t0 = esp_timer_get_time();
+		xSemaphoreTake(masters_mtx, portMAX_DELAY);
+		for (khiter_t k = kh_begin(masters); k != kh_end(masters); k++) {
+			if (!kh_exist(masters, k)) continue;
+			uint64_t *addr = &kh_key(masters, k);
+			running_stats_t *rs = &kh_value(masters, k);
+			running_stats_calc(rs, &mean, &stdev);
+			printf("master ");
+			print_mac((uint8_t *) addr);
+			printf(" mean: %f stdev: %f\n", mean, stdev);
+		}
+		xSemaphoreGive(masters_mtx);
+		int64_t t1 = esp_timer_get_time();
+		double ms = (double) (t1-t0) / 1000;
+		printf("done in %f ms\n", ms);
+		DELAY(1000);
+	}
+}
+
+void
 awdl_init()
 {
 	awdl_state_t *state = malloc(sizeof(awdl_state_t));
-	wawob = malloc(sizeof(*wawob));
-	wawob->pos = 0;
-	wawob->mtx = xSemaphoreCreateMutex();
+	// running_stats_init(&awc_offset_stats, 64);
+	masters = kh_init(masters);
+	masters_mtx = xSemaphoreCreateMutex();
 
 	printf("initializing awdl");
 	tcpip_init(NULL, NULL);
@@ -254,6 +302,8 @@ awdl_init()
 
     printf("switching to channel 6\n");
 	ESP_ERROR_CHECK(esp_wifi_set_channel(6, 0));
+
+    xTaskCreate(print_awc_stats_task, "print_awc_stats", 8192, NULL, 5, NULL);
 
     DELAY(100);
 }
