@@ -1,4 +1,6 @@
+int64_t wrap_mac(uint8_t *addr);
 void print_mac(uint8_t *addr);
+ip_addr_t mac_to_ip(uint8_t *addr);
 
 typedef struct {
 	int32_t *vals;

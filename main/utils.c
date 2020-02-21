@@ -1,8 +1,10 @@
 #include <stdio.h>
+#include <string.h>
 #include <math.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
+#include "lwip/ip_addr.h"
 #include "utils.h"
 
 void 
@@ -12,6 +14,25 @@ print_mac(uint8_t *addr)
 		addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
 }
 
+int64_t
+wrap_mac(uint8_t *addr)
+{
+	int64_t x;
+	memcpy(&x, addr, 6);
+	return x;
+}
+
+ip_addr_t 
+mac_to_ip(uint8_t *addr)
+{
+	char addrbuf[128];
+	sprintf(addrbuf, "fe80::%02x%02x:%02xff:fe%02x:%02x%02x",
+		addr[0]^0x2, addr[1], addr[2], addr[3], addr[4], addr[5]);
+	printf("converted to %s\n", addrbuf);
+	ip_addr_t ipaddr;
+	ipaddr_aton(addrbuf, &ipaddr);
+	return ipaddr;
+}
 
 void
 running_stats_init(running_stats_t *rs, int n)
