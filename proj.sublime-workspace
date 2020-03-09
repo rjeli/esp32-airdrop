@@ -1,0 +1,408 @@
+{
+	"auto_complete":
+	{
+		"selected_items":
+		[
+			[
+				"cri",
+				"criterion_benchmark"
+			],
+			[
+				"criter",
+				"criterion_group"
+			],
+			[
+				"Stat",
+				"StaticDoubleMatrix"
+			],
+			[
+				"MAtr",
+				"Matrix4x4d"
+			],
+			[
+				"UMModuleRe",
+				"UMModuleRegistryAdapter"
+			],
+			[
+				"extra",
+				"extraModulesForBridge"
+			],
+			[
+				"Swi",
+				"SwiftyZeroMQ"
+			],
+			[
+				"RC",
+				"RCTPromiseResolveBlock"
+			],
+			[
+				"RCTPromi",
+				"RCTPromiseRejectBlock"
+			],
+			[
+				"RCT",
+				"RCTPromiseResolveBlock"
+			],
+			[
+				"RCTPR",
+				"RCTPromiseRejectBlock"
+			],
+			[
+				"RCTPro",
+				"RCTPromiseResolveBlock"
+			],
+			[
+				"xSem",
+				"xSemaphoreGive"
+			],
+			[
+				"port",
+				"portMAX_DELAY"
+			],
+			[
+				"esp_even",
+				"esp_event_loop_handle_t"
+			],
+			[
+				"update",
+				"running_stats_update"
+			],
+			[
+				"runni",
+				"running_stats_t"
+			],
+			[
+				"awc_",
+				"awc_offset_stats"
+			],
+			[
+				"runn",
+				"running_stats_calc"
+			],
+			[
+				"xSe",
+				"xSemaphoreCreateMutex"
+			],
+			[
+				"awd",
+				"awdl_netif_idx"
+			],
+			[
+				"beacon",
+				"beacon_raw"
+			],
+			[
+				"beaco",
+				"beacon_raw"
+			],
+			[
+				"beac",
+				"beacon_rick"
+			],
+			[
+				"stat",
+				"state_update"
+			],
+			[
+				"VOICE_S",
+				"VOICE_SERVER_UPDATE"
+			],
+			[
+				"heartb",
+				"heartbeat_lock"
+			],
+			[
+				"hand",
+				"handshake_resp"
+			],
+			[
+				"tcpconn",
+				"TCPConn"
+			],
+			[
+				"orig",
+				"origCallback"
+			],
+			[
+				"response",
+				"responseText"
+			],
+			[
+				"strin",
+				"stringified"
+			],
+			[
+				"query",
+				"querySelector"
+			],
+			[
+				"insert",
+				"insertYtScrobbler"
+			]
+		]
+	},
+	"buffers":
+	[
+	],
+	"build_system": "",
+	"build_system_choices":
+	[
+	],
+	"build_varint": "",
+	"command_palette":
+	{
+		"height": 0.0,
+		"last_filter": "",
+		"selected_items":
+		[
+			[
+				"install ",
+				"Package Control: Install Package"
+			],
+			[
+				"instal",
+				"Package Control: Install Package"
+			],
+			[
+				"pack",
+				"Package Control: Remove Package"
+			],
+			[
+				"ui",
+				"UI: Select Theme"
+			],
+			[
+				"ui th",
+				"UI: Select Theme"
+			],
+			[
+				"color s",
+				"UI: Select Color Scheme"
+			],
+			[
+				"package resou",
+				"PackageResourceViewer: Open Resource"
+			],
+			[
+				"ui t",
+				"UI: Select Theme"
+			],
+			[
+				"color",
+				"UI: Select Color Scheme"
+			],
+			[
+				"install",
+				"Package Control: Install Package"
+			],
+			[
+				"package",
+				"Package Control: Install Package"
+			],
+			[
+				"resour",
+				"PackageResourceViewer: Open Resource"
+			],
+			[
+				"prv",
+				"PackageResourceViewer: Open Resource"
+			],
+			[
+				"package con ins",
+				"Package Control: Install Package"
+			],
+			[
+				"Install",
+				"Package Control: Install Package"
+			],
+			[
+				"Install ",
+				"Install Package Control"
+			],
+			[
+				":w",
+				":w - Save"
+			]
+		],
+		"width": 0.0
+	},
+	"console":
+	{
+		"height": 0.0,
+		"history":
+		[
+		]
+	},
+	"distraction_free":
+	{
+		"menu_visible": true,
+		"show_minimap": false,
+		"show_open_files": false,
+		"show_tabs": false,
+		"side_bar_visible": false,
+		"status_bar_visible": false
+	},
+	"expanded_folders":
+	[
+		"/home/eli/repos/esp32-airdrop"
+	],
+	"file_history":
+	[
+		"/home/eli/repos/gluehax/depth.jpg",
+		"/home/eli/repos/gluehax/depth2.jpg",
+		"/home/eli/repos/gluehax/download-scannet.py",
+		"/home/eli/Desktop/consider.py",
+		"/tmp/mozilla_eli0/download-scannet.py",
+		"/home/eli/mnt/ProntoApp/node_modules/@pixi/core/lib/core.js",
+		"/home/eli/mnt/ProntoApp/node_modules/pixi.js/lib/core/index.js",
+		"/home/eli/mnt/ProntoApp/ios/Backend.swift",
+		"/home/eli/mnt/ProntoApp/ios/Podfile",
+		"/home/eli/mnt/ProntoApp/App.jsx",
+		"/home/eli/esp/esp-idf/components/lwip/lwip/src/core/ipv6/ip6_addr.c",
+		"/home/eli/repos/esp32-airdrop/main/awdlif.h",
+		"/home/eli/esp/esp-idf/components/lwip/port/esp32/netif/wlanif.c",
+		"/home/eli/esp/esp-idf/components/tcpip_adapter/include/tcpip_adapter.h",
+		"/home/eli/repos/esp32-airdrop/.gitignore",
+		"/home/eli/.config/sublime-text-3/Packages/Solarized Color Scheme/Solarized (light).sublime-color-scheme",
+		"/home/eli/repos/esp32-airdrop/main/main.c",
+		"/home/eli/repos/esp32-airdrop/CMakeLists.txt",
+		"/home/eli/repos/discordhax/proxy2.py",
+		"/home/eli/.config/sublime-text-3/Packages/Color Scheme - Default/Monokai.sublime-color-scheme",
+		"/home/eli/repos/discordhax/Dockerfile.discord",
+		"/home/eli/repos/discordhax/Makefile",
+		"/home/eli/repos/discordhax/asar/app_bootstrap/request.js",
+		"/home/eli/repos/discordhax/asar/app_bootstrap/bootstrap.js",
+		"/home/eli/repos/discordhax/run.py",
+		"/home/eli/repos/discordhax/proxy.py",
+		"/home/eli/repos/discordhax/asar/app_bootstrap/requireNative.js",
+		"/home/eli/repos/discordhax/proxy.go",
+		"/home/eli/discord-asar/app_bootstrap/bootstrap.js.new",
+		"/home/eli/discord-asar/app_bootstrap/bootstrap.js",
+		"/home/eli/discord-asar/app_bootstrap/request.js.new",
+		"/home/eli/discord-asar/app_bootstrap/request.js",
+		"/home/eli/discord-asar/app_bootstrap/hostUpdater.js",
+		"/home/eli/repos/neettv/migrations/versions/9e38cbe2ce59_init.py",
+		"/home/eli/repos/neettv/Makefile",
+		"/home/eli/repos/neettv/web.py"
+	],
+	"find":
+	{
+		"height": 26.0
+	},
+	"find_in_files":
+	{
+		"height": 101.0,
+		"where_history":
+		[
+		]
+	},
+	"find_state":
+	{
+		"case_sensitive": false,
+		"find_history":
+		[
+		],
+		"highlight": true,
+		"in_selection": false,
+		"preserve_case": false,
+		"regex": false,
+		"replace_history":
+		[
+		],
+		"reverse": false,
+		"show_context": true,
+		"use_buffer2": true,
+		"whole_word": false,
+		"wrap": true
+	},
+	"groups":
+	[
+		{
+			"sheets":
+			[
+			]
+		}
+	],
+	"incremental_find":
+	{
+		"height": 26.0
+	},
+	"input":
+	{
+		"height": 38.0
+	},
+	"layout":
+	{
+		"cells":
+		[
+			[
+				0,
+				0,
+				1,
+				1
+			]
+		],
+		"cols":
+		[
+			0.0,
+			1.0
+		],
+		"rows":
+		[
+			0.0,
+			1.0
+		]
+	},
+	"menu_visible": true,
+	"output.find_results":
+	{
+		"height": 0.0
+	},
+	"pinned_build_system": "",
+	"project": "proj.sublime-project",
+	"replace":
+	{
+		"height": 48.0
+	},
+	"save_all_on_build": true,
+	"select_file":
+	{
+		"height": 0.0,
+		"last_filter": "",
+		"selected_items":
+		[
+		],
+		"width": 0.0
+	},
+	"select_project":
+	{
+		"height": 0.0,
+		"last_filter": "",
+		"selected_items":
+		[
+		],
+		"width": 0.0
+	},
+	"select_symbol":
+	{
+		"height": 0.0,
+		"last_filter": "",
+		"selected_items":
+		[
+		],
+		"width": 0.0
+	},
+	"selected_group": 0,
+	"settings":
+	{
+	},
+	"show_minimap": true,
+	"show_open_files": false,
+	"show_tabs": true,
+	"side_bar_visible": true,
+	"side_bar_width": 247.0,
+	"status_bar_visible": true,
+	"template_settings":
+	{
+	}
+}

@@ -15,6 +15,7 @@
 
 #include "macros.h"
 #include "awdlif.h"
+#include "utils.h"
 
 // #define WEB_URL "https://19f574e3714b._airdrop._tcp.local"
 // #define HOSTNAME "19f574e3714b._airdrop._tcp.local"
@@ -62,6 +63,26 @@ awdl_handler(void *handler_arg, esp_event_base_t base, int32_t evt, void *evt_da
 	}
 }
 
+void
+run_tests()
+{
+	mac_t mac = MAC(0x1, 0x2, 0x3, 0x4, 0x5, 0x6);
+	printf("mac: ");
+	print_mac(mac);
+	printf("\n");
+
+	ip_addr_t ipaddr = mac_to_ip(mac, 0);
+	char addrbuf[256];
+	ipaddr_ntoa_r(&ipaddr, addrbuf, sizeof(addrbuf));
+	printf("ipaddr: %s\n", addrbuf);
+
+	mac_t mac2 = MAC(0,0,0,0,0,0);
+	ip6_to_mac(ip_2_ip6(&ipaddr), &mac2);
+	printf("mac2: ");
+	print_mac(mac2);
+	printf("\n");
+}
+
 void 
 app_main()
 {
@@ -78,14 +99,14 @@ app_main()
     printf("%dMB %s flash\n", spi_flash_get_chip_size() / (1024 * 1024),
             (chip_info.features & CHIP_FEATURE_EMB_FLASH) ? "embedded" : "external");
 
+    run_tests();
+
 	https_mtx = xSemaphoreCreateMutex();
 
     ESP_ERROR_CHECK(nvs_flash_init());
     esp_event_loop_handle_t awdl_loop = awdl_init();
     ESP_ERROR_CHECK(esp_event_handler_register_with(
     	awdl_loop, AWDL_EVENT, AWDL_FOUND_AIRDROP, awdl_handler, NULL));
-
-    // xTaskCreate(https_task, "https_task", 8192, NULL, 5, NULL);
 
     for (;;) {
     	printf("idle...\n");

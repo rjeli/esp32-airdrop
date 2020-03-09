@@ -12,6 +12,10 @@
 #include "lwip/prot/dhcp.h"
 // #include "netif/etharp.h"
 #include "esp_wifi.h"
+#include "esp_phy_init.h"
+#include "esp_bt.h"
+#include "esp_bt_main.h"
+#include "esp_gap_ble_api.h"
 
 #include "freertos/FreeRTOS.h"
 
@@ -31,7 +35,22 @@
 #define AW_US (TU_US*TU_PER_AW)
 #define AWC_US (AW_US*AW_PER_AWC)
 
+// can be 10ms off (should be 5 but idk if possible)
+#define MAX_SYNC_STDEV_US 10000
+
+static int64_t wifi_init_ts = 0;
+
 char *mac_bytes = "\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c";
+
+uint8_t airdrop_ble_data[] = {
+	0x02, 0x01, 0x1b, 0x17,
+    0xff, 0x4c, 0x00, 0x05,
+    0x12, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00,
+    0x00, 0x01, 0x00, 0x01,
+    0x02, 0x03, 0x04, 0x05,
+    0x06, 0x07, 0x00,
+};
 
 ESP_EVENT_DEFINE_BASE(AWDL_EVENT);
 
@@ -41,6 +60,14 @@ static esp_event_loop_handle_t loop;
 KHASH_MAP_INIT_STR(dns_map, ip_addr_t);
 static khash_t(dns_map) *dns_map;
 static SemaphoreHandle_t dns_mtx;
+
+static esp_timer_handle_t awdl_timer;
+
+void 
+awdl_timer_cb(void *arg)
+{
+	printf("timer cb\n");
+}
 
 err_t
 awdl_dns_lookup(const char *name, ip_addr_t *addr, u8_t dns_addrtype)
@@ -56,7 +83,6 @@ awdl_dns_lookup(const char *name, ip_addr_t *addr, u8_t dns_addrtype)
 		*addr = kh_val(dns_map, k);
 		printf("found entry\n");
 	}
-	ip6_addr_set_zone(ip_2_ip6(addr), awdl_netif_idx);
 	xSemaphoreGive(dns_mtx);
 	return ERR_OK;
 }
@@ -90,20 +116,60 @@ lookup_dns_entry(uint8_t tag)
 	return NULL;
 }
 
+// Master MACs to timing info
 KHASH_MAP_INIT_INT64(masters, running_stats_t);
 static khash_t(masters) *masters;
 
-KHASH_MAP_INIT_INT64(master_map, int32_t);
-static khash_t(master_map) *master_map;
+typedef struct {
+	mac_t master;
+	uint8_t chseq[16];
+} neigh_info_t;
+
+void
+neigh_info_init(neigh_info_t *ni)
+{
+	ni->master = MAC(0,0,0,0,0,0);
+	for (int i = 0; i < 16; i++) {
+		ni->chseq[i] = 0;
+	}
+}
+
+// Neighbor MACs to info
+KHASH_MAP_INIT_INT64(neighbors, neigh_info_t);
+static khash_t(neighbors) *neighbors;
+
+// must hold masters_mtx while calling
+neigh_info_t *
+get_or_create_neighbor(mac_t mac)
+{
+	int ret;
+	khiter_t k = kh_put(neighbors, neighbors, wrap_mac(mac), &ret);
+	neigh_info_t *ni = &kh_value(neighbors, k);
+	if (ret > 0) {
+		neigh_info_init(ni);
+	}
+	return ni;
+}
+
+neigh_info_t *
+get_neighbor(mac_t mac)
+{
+	khiter_t k = kh_get(neighbors, neighbors, wrap_mac(mac));
+	if (k == kh_end(neighbors)) {
+		return NULL;
+	} else {
+		return &kh_value(neighbors, k);
+	}
+}
 
 static SemaphoreHandle_t masters_mtx;
 
 void
-update_master(uint8_t *addr, uint8_t *maddr, int32_t offset)
+update_master(mac_t addr, mac_t maddr, int64_t offset)
 {
 	xSemaphoreTake(masters_mtx, portMAX_DELAY);
 	// update master offset
-	uint64_t key = wrap_mac(maddr);
+	int64_t key = wrap_mac(maddr);
 	int ret;
 	khiter_t k = kh_put(masters, masters, key, &ret);
 	running_stats_t *rs = &kh_value(masters, k);
@@ -112,19 +178,17 @@ update_master(uint8_t *addr, uint8_t *maddr, int32_t offset)
 		running_stats_init(rs, 16);
 	}
 	running_stats_update(rs, offset);
-	// update master map
-	key = wrap_mac(addr);
-	k = kh_put(master_map, master_map, key, &ret);
-	kh_value(master_map, k) = wrap_mac(maddr);
+	// update neighbor's master
+	neigh_info_t *ni = get_or_create_neighbor(addr);
+	ni->master = maddr;
 	xSemaphoreGive(masters_mtx);
 }
 
 void
 handle_srv_resp(uint8_t *pkt_payload, uint8_t *tlv_payload)
 {
-	uint8_t txaddr[6];
-	memcpy(&txaddr[0], &pkt_payload[10], 6);
-	print_mac(&pkt_payload[10]);
+	mac_t txaddr = mac_from_bytes(&pkt_payload[10]);
+	print_mac(txaddr);
 	printf(" ");
 
 	// printf(" ");
@@ -177,7 +241,7 @@ handle_srv_resp(uint8_t *pkt_payload, uint8_t *tlv_payload)
 			xSemaphoreTake(dns_mtx, portMAX_DELAY);
 			int ret;
 			khiter_t k = kh_put(dns_map, dns_map, (char *) buf, &ret);
-			kh_value(dns_map, k) = mac_to_ip(txaddr);
+			kh_value(dns_map, k) = mac_to_ip(txaddr, awdl_netif_idx);
 			xSemaphoreGive(dns_mtx);
 		}
 	}
@@ -187,19 +251,22 @@ handle_srv_resp(uint8_t *pkt_payload, uint8_t *tlv_payload)
 void
 handle_sync_params(uint8_t *pkt_payload, uint8_t *tlv_payload, uint32_t timestamp)
 {
-	uint8_t txaddr[6], masteraddr[6];
-	memcpy(&txaddr[0], &pkt_payload[10], 6);
+	// uint8_t txaddr[6], masteraddr[6];
+	// memcpy(&txaddr[0], &pkt_payload[10], 6);
+	mac_t txaddr = mac_from_bytes(&pkt_payload[10]);
 	uint8_t *fparams = &pkt_payload[28];
 	uint32_t phy_tx_time = *((uint32_t *) (fparams+4));
 	uint32_t tgt_tx_time = *((uint32_t *) (fparams+8));
-	memcpy(&masteraddr[0], tlv_payload+21, 6);
+	// printf("phy_tx_time: %" PRIu32 " tgt_tx_time: %" PRIu32 "\n", phy_tx_time, tgt_tx_time);
+	mac_t masteraddr = mac_from_bytes(&tlv_payload[21]);
+	// memcpy(&masteraddr[0], tlv_payload+21, 6);
 
-	uint32_t remaining_tus = *((uint16_t *) (tlv_payload+15));
-	uint32_t next_aw_ts = timestamp + remaining_tus*TU_US - (phy_tx_time-tgt_tx_time);
-	uint32_t next_aw_seqnum = *((uint16_t *) (tlv_payload+29)) + 1;
-	uint32_t next_aw_misalignment = next_aw_seqnum % AW_PER_AWC;
-	uint32_t awc_start = next_aw_ts - (next_aw_misalignment*AW_US);
-	uint32_t offset = awc_start % AWC_US;
+	int64_t remaining_tus = *((uint16_t *) (tlv_payload+15));
+	int64_t next_aw_ts = wifi_init_ts + timestamp + remaining_tus*TU_US - (phy_tx_time-tgt_tx_time);
+	int64_t next_aw_seqnum = *((uint16_t *) (tlv_payload+29)) + 1;
+	int64_t next_aw_misalignment = next_aw_seqnum % AW_PER_AWC;
+	int64_t awc_start = next_aw_ts - (next_aw_misalignment*AW_US);
+	int64_t offset = awc_start % AWC_US;
 
 	printf("update from ");
 	print_mac(txaddr);
@@ -219,11 +286,11 @@ wifi_pkt_handler(void *buf, wifi_promiscuous_pkt_type_t type)
 	if (pkt->payload[0] == 0x08) {
 		if (!memcmp(&pkt->payload[16], "\x00\x25\x00\xff\x94\x73", 6)) {
 			printf("got awdl_data packet for");
-			print_mac(&pkt->payload[4]);
+			print_mac(mac_from_bytes(&pkt->payload[4]));
 			printf("\n");
 			if (!memcmp(&pkt->payload[4], mac_bytes, 6)) {
-				for (int i = 0; i < 10; i++) {
-					printf("I GOT A PACKET! ");
+				for (int i = 0; i < 100; i++) {
+					printf("I GOT A DATA PACKET! \n");
 				}
 				printf("\n");
 			}
@@ -253,7 +320,21 @@ wifi_pkt_handler(void *buf, wifi_promiscuous_pkt_type_t type)
 			handle_sync_params(pkt->payload, tlv_payload, pkt->rx_ctrl.timestamp);
 			break;
 		ENUMCASE(AWDL_TAG_SRV_PARAMS);
-		ENUMCASE(AWDL_TAG_CH_SEQ);
+		ENUMCASEO(AWDL_TAG_CH_SEQ);
+			printf("channel seq:");
+			uint8_t *chseq = &tlv_payload[6];
+			for (int i = 0; i < 16; i++) {
+				printf(" %d", chseq[i*2]);
+			}
+			printf("\n");
+			xSemaphoreTake(masters_mtx, portMAX_DELAY);
+			mac_t txaddr = mac_from_bytes(&pkt->payload[10]);
+			neigh_info_t *ni = get_or_create_neighbor(txaddr);
+			for (int i = 0; i < 16; i++) {
+				ni->chseq[i] = chseq[i*2];
+			}
+			xSemaphoreGive(masters_mtx);
+			break;
 		ENUMDEFAULT(tlv[0]);
 		}
 		tlv += tlv_len+3;
@@ -282,24 +363,33 @@ awdl_output(struct netif *netif, struct pbuf *p, const ip4_addr_t *ipaddr)
 }
 
 uint8_t wlan_hdr[] = {
-	0x08, 0x00, 0x00, 0x00, 0x33, 0x33, 0x80, 0x00,
-	0x00, 0xfb, 0x06, 0x7a, 0x51, 0x14, 0xf8, 0xb7,
-	0x00, 0x25, 0x00, 0xff, 0x94, 0x73, 0x50, 0x65,
+	0x08, 0x00, // frame control: data
+	0x00, 0x00, // duration
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // dst
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // src
+	0x00, 0x25, 0x00, 0xff, 0x94, 0x73, // bssid (apple)
+	0x50, 0x65, // seq ctrl
 };
 
 uint8_t llc_hdr[] = {
-	0xaa, 0xaa, 0x03, 0x00, 0x17, 0xf2, 0x08, 0x00,
+	0xaa, 0xaa, // dsap, ssap
+	0x03, // ctrl
+	0x00, 0x17, 0xf2, // OUI (apple)
+	0x08, 0x00, // protocol
 };
 
 uint8_t awdl_hdr[] = {
-	0x03, 0x04, 0x7d, 0x00, 0x00, 0x00, 0x86, 0xdd,
+	0x03, 0x04, // magic
+	0x00, 0x00, // seqnum
+	0x00, 0x00, // reserved
+	0x86, 0xdd, // ethertype
 };
 
 err_t
-awdl_output6(struct netif *netif, struct pbuf *p, const ip6_addr_t *ipaddr)
+awdl_output6(struct netif *netif, struct pbuf *p, const ip6_addr_t *ip6addr)
 {
 	char addrbuf[256];
-	ip6addr_ntoa_r(ipaddr, addrbuf, sizeof(addrbuf));
+	ip6addr_ntoa_r(ip6addr, addrbuf, sizeof(addrbuf));
 	printf("awdl_output6: sending frame to %s (len %d, next: %d)\n", addrbuf, p->len, p->next!=NULL);
 	for (int i = 0; i < p->len; i++) {
 		printf("%02x ", ((uint8_t *) p->payload)[i]);
@@ -307,9 +397,91 @@ awdl_output6(struct netif *netif, struct pbuf *p, const ip6_addr_t *ipaddr)
 		if (i % 16 == 0) printf("\n");
 	}
 	printf("\n");
+
+	mac_t mac;
+	ip6_to_mac(ip6addr, &mac);
+	printf("mac: ");
+	print_mac(mac);
+	printf("\n");
+
+	xSemaphoreTake(masters_mtx, portMAX_DELAY);
+
+	running_stats_t *rs = NULL;
+	neigh_info_t *ni = get_neighbor(mac);
+	if (ni == NULL) {
+		printf("neighbor not found\n");
+		goto fail;
+	}
+
+	printf("found neighbor\n");
+	printf("  master: ");
+	print_mac(ni->master);
+	printf("\n");
+	printf("  chseq:");
+	for (int i = 0; i < 16; i++) {
+		printf(" %d", ni->chseq[i]);
+	}
+	printf("\n");
+
+	mac_t null_mac = NULL_MAC;
+	if (!memcmp(&ni->master, &null_mac, sizeof(null_mac))) {
+		printf("  null master\n");
+		goto fail;
+	}
+	khint_t k = kh_get(masters, masters, wrap_mac(ni->master));
+	if (k == kh_end(masters)) {
+		printf("  unknown master\n");
+		goto fail;
+	}
+	rs = &kh_value(masters, k);
+
+	float mean, stdev;
+	running_stats_calc(rs, &mean, &stdev);
+	if (stdev > MAX_SYNC_STDEV_US) {
+		printf("stdev %f too large to attempt tx\n", stdev);
+		goto fail;
+	}
+
+	printf("synchronized to master, ready to tx\n");
+
+	int ch6idx = -1;
+	for (int i = 0; i < 16; i++) {
+		if (ni->chseq[i] == 6) {
+			ch6idx = i;
+			break;
+		}
+	}
+	if (ch6idx == -1) {
+		printf("never on channel 6\n");
+		goto fail;
+	}
+
+	goto send;
+
+fail:
+	xSemaphoreGive(masters_mtx);
+	return ERR_OK;
+
+send:
+	xSemaphoreGive(masters_mtx);
+	int64_t target_aw_offset = ch6idx*4*AW_US;
+	int64_t current_offset = (esp_timer_get_time() + (int64_t) mean) % AWC_US;
+	printf("tgt_aw_offset: %" PRIu64 " cur_offset: %" PRIu64 "\n", target_aw_offset, current_offset);
+	if (current_offset < target_aw_offset) {
+		printf("waiting to transmit this cycle\n");
+		DELAY((target_aw_offset-current_offset)/1000+5);
+	} else if (current_offset < target_aw_offset + AW_US*4) {
+		printf("immediate tx\n");
+	} else {
+		printf("have to wait until next cycle\n");
+		DELAY((AWC_US-current_offset+target_aw_offset)/1000+5);
+	}
+	int64_t new_offset = (esp_timer_get_time() + (int64_t) mean) % AWC_US;
+	printf("new_offset: %" PRIu64 "\n", new_offset);
+
 	// ethip6_output(netif, p, ipaddr);
 
-	uint8_t *buf = malloc(1024);
+	uint8_t *buf = malloc(4096);
 	uint8_t *pos = buf;
 	memcpy(pos, wlan_hdr, sizeof(wlan_hdr));
 	pos += sizeof(wlan_hdr);
@@ -320,20 +492,19 @@ awdl_output6(struct netif *netif, struct pbuf *p, const ip6_addr_t *ipaddr)
 	memcpy(pos, p->payload, p->len);
 	pos += p->len;
 
-	ESP_ERROR_CHECK(esp_wifi_80211_tx(ESP_IF_ETH, buf, pos-buf, false));
+	memcpy(&buf[4], mac.addr, 6); // dst
+	memcpy(&buf[10], mac_bytes, 6); // src
 
+	ESP_ERROR_CHECK(esp_wifi_80211_tx(WIFI_IF_AP, buf, pos-buf, true)); // try true for now?
+
+	free(buf);
+	printf("sent\n");
 	return ERR_OK;
 }
 
 err_t
 awdl_link_output(struct netif *netif, struct pbuf *p)
 {
-	/*
-	printf("awdl mac unimplemented\n");
-	fflush(stdout);
-	DELAY(100);
-	abort();
-	*/
 	printf("awdl_link_output (len %d, next: %d)\n", p->len, p->next!=NULL);
 	for (int i = 0; i < p->len; i++) {
 		printf("%02x ", ((uint8_t *) p->payload)[i]);
@@ -374,11 +545,11 @@ print_awc_stats_task(void *params)
 		xSemaphoreTake(masters_mtx, portMAX_DELAY);
 		for (khiter_t k = kh_begin(masters); k != kh_end(masters); k++) {
 			if (!kh_exist(masters, k)) continue;
-			uint64_t *addr = &kh_key(masters, k);
+			mac_t addr = unwrap_mac(kh_key(masters, k));
 			running_stats_t *rs = &kh_value(masters, k);
 			running_stats_calc(rs, &mean, &stdev);
 			printf("master ");
-			print_mac((uint8_t *) addr);
+			print_mac(addr);
 			printf(" mean: %f stdev: %f\n", mean, stdev);
 		}
 		xSemaphoreGive(masters_mtx);
@@ -389,13 +560,152 @@ print_awc_stats_task(void *params)
 	}
 }
 
+uint8_t wlan_action_hdr[] = {
+	// 802.11 
+	0xd0, 0x00, // action
+	0x00, 0x00, // duration
+	0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // dst
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // src
+	0x00, 0x25, 0x00, 0xff, 0x94, 0x73, // bssid (apple)
+	0x00, 0x00, // seq ctrl
+
+	// 802.11 action
+	0x7f, 0x00, 0x17, 0xf2, // oui (apple)
+
+	// awdl fixed params
+	0x08, 0x10, // awdl, version 1.0
+	0x00, 0x00, // PSF, reserved
+	0x00, 0x00, 0x00, 0x00, // phy tx time
+	0x00, 0x00, 0x00, 0x00, // tgt tx time
+};
+
+uint8_t sync_params[] = {
+	0x04, 0x49, 0x00, // sync tag, 73 bytes
+	0x06, // next aw channel
+	0x28, 0x00, // tx counter
+	0x06, // master channel
+	0x00, // guard time
+	0x10, 0x00, // aw period
+	0x6e, 0x00, // af period
+	0x00, 0x18, // awdl flags?
+	0x10, 0x00, // aw ext len
+	0x10, 0x00, // aw common len
+	0x00, 0x00, // remaining aw len
+	0x03, 0x03, 0x03, 0x03, // min ext, & multi, uni, af
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // master addr
+	0x04, 0x00, // presence mode, unknown
+	0x05, 0x0d, // aw seq num
+	0x00, 0x00, // ap beacon alignment delta
+	0x0f, // num channels
+	0x01, // encoding
+	0x00, // duplicate
+	0x03, // step cnt
+	0xff, 0xff, // fill repeat
+	0x1d, 0x97, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // channel list
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x2b, 0x06, 0x1d, 0x97, 0x1d, 0x97, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, // padding
+};
+
+uint8_t chseq_params[] = {
+	0x12, 0x29, 0x00, // chseq tag, 41 bytes
+	0x0f, // num ch
+	0x03, // encoding opclass?
+	0x00, // duplicate
+	0x03, // step cnt
+	0xff, 0xff, // fill repeat
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // ch list
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, // padding
+};
+
+void
+awdl_periodic_sync_task(void *params)
+{
+	uint8_t *buf = malloc(4096);
+	for (;;) {
+		// pick best master
+		mac_t best_master_addr = NULL_MAC;
+		float best_master_stdev = MAX_SYNC_STDEV_US;
+		float mean, stdev;
+		xSemaphoreTake(masters_mtx, portMAX_DELAY);
+		for (khiter_t k = kh_begin(masters); k != kh_end(masters); k++) {
+			if (!kh_exist(masters, k)) continue;
+			mac_t maddr = unwrap_mac(kh_key(masters, k));
+			running_stats_t *rs = &kh_value(masters, k);
+			running_stats_calc(rs, &mean, &stdev);
+			if (stdev < best_master_stdev) {
+				best_master_addr = maddr;
+				best_master_stdev = stdev;
+			}
+		}
+		xSemaphoreGive(masters_mtx);
+		if (best_master_stdev == MAX_SYNC_STDEV_US) {
+			goto done;
+		}
+
+		uint8_t *pos = buf;
+
+		memcpy(pos, wlan_action_hdr, sizeof(wlan_action_hdr));
+		memcpy(&pos[10], mac_bytes, 6); // src mac
+		int64_t now = esp_timer_get_time();
+		memcpy(&pos[32], (uint32_t *) &now, 4);
+		memcpy(&pos[36], (uint32_t *) &now, 4);
+		pos += sizeof(wlan_action_hdr);
+
+		memcpy(pos, sync_params, sizeof(sync_params));
+		memcpy(&pos[24], best_master_addr.addr, 6);
+		pos += sizeof(sync_params);
+
+		memcpy(pos, chseq_params, sizeof(chseq_params));
+		for (int i = 0; i < 16; i++) {
+			pos[9+i*2] = 0x06;
+			pos[9+i*2+1] = 0x51;
+		}
+		pos += sizeof(chseq_params);
+
+		ESP_ERROR_CHECK(esp_wifi_80211_tx(WIFI_IF_AP, buf, pos-buf, true)); // try true for now?
+
+done:
+		DELAY(1000);
+	}
+}
+
+void
+ble_handler(esp_gap_ble_cb_event_t evt, esp_ble_gap_cb_param_t *param)
+{
+	printf("got ble event: ");
+	switch (evt) {
+	ENUMCASEO(ESP_GAP_BLE_ADV_DATA_RAW_SET_COMPLETE_EVT);
+		printf(" status: %d", param->adv_data_raw_cmpl.status);
+		break;
+	ENUMCASEO(ESP_GAP_BLE_ADV_START_COMPLETE_EVT);
+		printf(" status: %d", param->adv_start_cmpl.status);
+		break;
+	ENUMCASEO(ESP_GAP_BLE_ADV_STOP_COMPLETE_EVT);
+		printf(" status: %d", param->adv_stop_cmpl.status);
+		break;
+	ENUMCASE(ESP_GAP_BLE_SCAN_RSP_DATA_SET_COMPLETE_EVT);
+	ENUMCASE(ESP_GAP_BLE_SCAN_PARAM_SET_COMPLETE_EVT);
+	ENUMCASE(ESP_GAP_BLE_SCAN_RESULT_EVT);
+	ENUMCASE(ESP_GAP_BLE_SCAN_RSP_DATA_RAW_SET_COMPLETE_EVT);
+	ENUMCASE(ESP_GAP_BLE_SCAN_START_COMPLETE_EVT);
+	ENUMCASE(ESP_GAP_BLE_SCAN_STOP_COMPLETE_EVT);
+	ENUMDEFAULT(evt);
+	}
+	printf("\n");
+}
+
 esp_event_loop_handle_t
 awdl_init()
 {
 	awdl_state_t *state = malloc(sizeof(awdl_state_t));
-	// running_stats_init(&awc_offset_stats, 64);
+
 	masters = kh_init(masters);
-	master_map = kh_init(master_map);
+	neighbors = kh_init(neighbors);
 	masters_mtx = xSemaphoreCreateMutex();
 
 	dns_map = kh_init(dns_map);
@@ -410,27 +720,27 @@ awdl_init()
 	};
 	ESP_ERROR_CHECK(esp_event_loop_create(&loop_args, &loop));
 
-	printf("initializing awdl");
-	tcpip_init(NULL, NULL);
-	IP4_ADDR(&state->ipaddr, 192, 168, 55, 2);
-	IP4_ADDR(&state->netmask, 255, 255, 255, 0);
-	IP4_ADDR(&state->gw, 192, 168, 55, 1);
-
-	printf("adding awdl iface\n");
-	netif_add(&state->netif, &state->ipaddr, &state->netmask, &state->gw, NULL, awdlif_init, tcpip_input);
-	netif_set_default(&state->netif);
-	netif_set_up(&state->netif);
-	netif_set_default(&state->netif);
-	awdl_netif_idx = netif_get_index(&state->netif);
-
     // init wifi
     printf("initializing wifi\n");
     wifi_init_config_t wifi_cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&wifi_cfg));
     ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_NULL));
-    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
+    wifi_config_t ap_cfg = {
+    	.ap = {
+    		.ssid = "esp32-fakebeacon",
+    		.ssid_len = 0,
+    		.password = "dummypass",
+    		.channel = 1,
+    		.authmode = WIFI_AUTH_WPA2_PSK,
+    		.ssid_hidden = 1,
+    		.max_connection = 4,
+    		.beacon_interval = 60000,
+    	},
+    };
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_cfg));
     ESP_ERROR_CHECK(esp_wifi_start());
+    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
     DELAY(100);
 
     printf("initializing promiscuous mode\n");
@@ -445,7 +755,52 @@ awdl_init()
     printf("switching to channel 6\n");
 	ESP_ERROR_CHECK(esp_wifi_set_channel(6, 0));
 
+	// init bt
+	printf("initializing bluetooth\n");
+    esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_bt_controller_init(&bt_cfg));
+    ESP_ERROR_CHECK(esp_bt_controller_enable(ESP_BT_MODE_BTDM));
+    ESP_ERROR_CHECK(esp_bluedroid_init());
+    ESP_ERROR_CHECK(esp_bluedroid_enable());
+    // init ble
+    ESP_ERROR_CHECK(esp_ble_gap_register_callback(ble_handler));
+    ESP_ERROR_CHECK(esp_ble_gap_config_adv_data_raw(airdrop_ble_data, sizeof(airdrop_ble_data)));
+    esp_ble_adv_params_t adv_params = {
+    	.adv_int_min = 300,
+    	.adv_int_max = 300,
+    	.adv_type = ADV_TYPE_NONCONN_IND,
+    	.own_addr_type = BLE_ADDR_TYPE_PUBLIC,
+    	.peer_addr = {0},
+    	.peer_addr_type = BLE_ADDR_TYPE_PUBLIC,
+    	.channel_map = ADV_CHNL_ALL,
+    	.adv_filter_policy = ADV_FILTER_ALLOW_SCAN_ANY_CON_ANY,
+    };
+    ESP_ERROR_CHECK(esp_ble_gap_start_advertising(&adv_params));
+
+	printf("initializing awdl");
+	tcpip_init(NULL, NULL);
+	IP4_ADDR(&state->ipaddr, 192, 168, 55, 2);
+	IP4_ADDR(&state->netmask, 255, 255, 255, 0);
+	IP4_ADDR(&state->gw, 192, 168, 55, 1);
+
+	printf("adding awdl iface\n");
+	netif_add(&state->netif, &state->ipaddr, &state->netmask, &state->gw, NULL, awdlif_init, tcpip_input);
+	netif_set_default(&state->netif);
+	netif_set_up(&state->netif);
+	netif_set_default(&state->netif);
+	awdl_netif_idx = netif_get_index(&state->netif);
+
+	wifi_init_ts = esp_phy_rf_get_on_ts();
+
+	esp_timer_create_args_t timer_args = {
+		.callback = awdl_timer_cb,
+		.arg = NULL,
+
+	};
+	ESP_ERROR_CHECK(esp_timer_create(&timer_args, &awdl_timer));
+
     xTaskCreate(print_awc_stats_task, "print_awc_stats", 8192, NULL, 5, NULL);
+    xTaskCreate(awdl_periodic_sync_task, "awdl_periodic_sync", 8192, NULL, 5, NULL);
 
     DELAY(100);
 
