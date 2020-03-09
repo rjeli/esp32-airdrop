@@ -18,6 +18,8 @@ typedef struct {
 	int64_t *vals;
 	int pos, cap;
 	SemaphoreHandle_t mtx;
+
+	int64_t recent_awc_seqnum;
 } running_stats_t;
 
 void running_stats_init(running_stats_t *rs, int n);

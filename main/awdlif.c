@@ -165,7 +165,7 @@ get_neighbor(mac_t mac)
 static SemaphoreHandle_t masters_mtx;
 
 void
-update_master(mac_t addr, mac_t maddr, int64_t offset)
+update_master(mac_t addr, mac_t maddr, int64_t offset, int64_t next_aw_seqnum)
 {
 	xSemaphoreTake(masters_mtx, portMAX_DELAY);
 	// update master offset
@@ -178,6 +178,7 @@ update_master(mac_t addr, mac_t maddr, int64_t offset)
 		running_stats_init(rs, 16);
 	}
 	running_stats_update(rs, offset);
+	rs->recent_awc_seqnum = (next_aw_seqnum/1024)*1024;
 	// update neighbor's master
 	neigh_info_t *ni = get_or_create_neighbor(addr);
 	ni->master = maddr;
@@ -275,7 +276,7 @@ handle_sync_params(uint8_t *pkt_payload, uint8_t *tlv_payload, uint32_t timestam
 	printf(" remaining_tus: %d next_aw: %d offset: %f\n", 
 		(int) remaining_tus, (int) next_aw_seqnum,
 		(double) offset);
-	update_master(txaddr, masteraddr, offset);
+	update_master(txaddr, masteraddr, offset, next_aw_seqnum);
 }
 
 void
@@ -293,6 +294,7 @@ wifi_pkt_handler(void *buf, wifi_promiscuous_pkt_type_t type)
 					printf("I GOT A DATA PACKET! \n");
 				}
 				printf("\n");
+				DELAY(100000);
 			}
 		}
 		return;
@@ -368,7 +370,7 @@ uint8_t wlan_hdr[] = {
 	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // dst
 	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // src
 	0x00, 0x25, 0x00, 0xff, 0x94, 0x73, // bssid (apple)
-	0x50, 0x65, // seq ctrl
+	0x00, 0x00, // seq ctrl
 };
 
 uint8_t llc_hdr[] = {
@@ -385,18 +387,23 @@ uint8_t awdl_hdr[] = {
 	0x86, 0xdd, // ethertype
 };
 
+void
+print_buf(uint8_t *buf, size_t len)
+{
+	for (int i = 0; i < len; i++) {
+		printf("%02x ", buf[i]);
+		if (i % 8 == 0) printf(" ");
+		if (i % 16 == 0) printf("\n");
+	}
+	printf("\n");
+}
+
 err_t
 awdl_output6(struct netif *netif, struct pbuf *p, const ip6_addr_t *ip6addr)
 {
 	char addrbuf[256];
 	ip6addr_ntoa_r(ip6addr, addrbuf, sizeof(addrbuf));
 	printf("awdl_output6: sending frame to %s (len %d, next: %d)\n", addrbuf, p->len, p->next!=NULL);
-	for (int i = 0; i < p->len; i++) {
-		printf("%02x ", ((uint8_t *) p->payload)[i]);
-		if (i % 8 == 0) printf(" ");
-		if (i % 16 == 0) printf("\n");
-	}
-	printf("\n");
 
 	mac_t mac;
 	ip6_to_mac(ip6addr, &mac);
@@ -579,10 +586,20 @@ uint8_t wlan_action_hdr[] = {
 	0x00, 0x00, 0x00, 0x00, // tgt tx time
 };
 
+size_t
+add_chlist(uint8_t *buf)
+{
+	for (int i = 0; i < 16; i++) {
+		buf[i*2] = 0x06;
+		buf[i*2+1] = 0x51;
+	}
+	return 32;
+}
+
 uint8_t sync_params[] = {
 	0x04, 0x49, 0x00, // sync tag, 73 bytes
 	0x06, // next aw channel
-	0x28, 0x00, // tx counter
+	0x00, 0x00, // tx counter
 	0x06, // master channel
 	0x00, // guard time
 	0x10, 0x00, // aw period
@@ -597,39 +614,66 @@ uint8_t sync_params[] = {
 	0x05, 0x0d, // aw seq num
 	0x00, 0x00, // ap beacon alignment delta
 	0x0f, // num channels
-	0x01, // encoding
+	0x03, // encoding legacy
 	0x00, // duplicate
 	0x03, // step cnt
 	0xff, 0xff, // fill repeat
-	0x1d, 0x97, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // channel list
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-	0x2b, 0x06, 0x1d, 0x97, 0x1d, 0x97, 0x00, 0x00,
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+};
+
+uint8_t elec_params[] = {
+	0x05, 0x15, 0x00, // elec tag, 21 bytes
+	0x00, 0x00, 0x00, // flags, id
+	0x01, // dist to master
+	0x00, // unknown
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // master addr
+	0x12, 0x02, 0x00, 0x00, // master metric: 530
+	0x10, 0x02, 0x00, 0x00, // self metric: 528
 	0x00, 0x00, // padding
 };
 
 uint8_t chseq_params[] = {
 	0x12, 0x29, 0x00, // chseq tag, 41 bytes
 	0x0f, // num ch
-	0x03, // encoding opclass?
+	0x03, // encoding opclass
 	0x00, // duplicate
 	0x03, // step cnt
 	0xff, 0xff, // fill repeat
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // ch list
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-	0x00, 0x00, 0x00, // padding
+};
+
+uint8_t version_params[] = {
+	0x15, 0x02, 0x00, // version tag, 2 bytes
+	0x40, 0x02, // awdl 4.0 device iOS or watchOS
+};
+
+uint8_t ping_pkt[] = {
+	0x60, 0x03, 0x0c, 0xde, // ipv6 hdr
+	0x00, 0x10, // payload len 16
+	0x3a, // icmpv6
+	0x40, // hop limit 64
+	0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // src
+	0x03, 0x02, 0x03, 0xff, 0xfe, 0x04, 0x05, 0x06,
+	0xff, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // dst
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+
+	0x80, // ping request
+	0x00, // code
+	0xfc, 0x27, // checksum
+	0x58, 0xa1, // identifier
+	0x00, 0x00, // seqnum
+	0xde, 0xad, 0xbe, 0xef, 0xca, 0xfe, 0xba, 0xbe, // data??
 };
 
 void
 awdl_periodic_sync_task(void *params)
 {
+	int iter = 0;
 	uint8_t *buf = malloc(4096);
 	for (;;) {
 		// pick best master
 		mac_t best_master_addr = NULL_MAC;
 		float best_master_stdev = MAX_SYNC_STDEV_US;
+		float best_master_mean = 0;
+		int64_t best_awc_seqnum = 0;
 		float mean, stdev;
 		xSemaphoreTake(masters_mtx, portMAX_DELAY);
 		for (khiter_t k = kh_begin(masters); k != kh_end(masters); k++) {
@@ -639,13 +683,20 @@ awdl_periodic_sync_task(void *params)
 			running_stats_calc(rs, &mean, &stdev);
 			if (stdev < best_master_stdev) {
 				best_master_addr = maddr;
+				best_master_mean = mean;
 				best_master_stdev = stdev;
+				best_awc_seqnum = rs->recent_awc_seqnum;
 			}
 		}
 		xSemaphoreGive(masters_mtx);
 		if (best_master_stdev == MAX_SYNC_STDEV_US) {
+			printf("no master\n");
 			goto done;
 		}
+
+		int64_t current_offset = (esp_timer_get_time() + (int64_t) best_master_mean) % AWC_US;
+		int64_t current_aw = current_offset / AW_US;
+		int64_t current_aw_seqnum = best_awc_seqnum + current_aw;
 
 		uint8_t *pos = buf;
 
@@ -658,19 +709,50 @@ awdl_periodic_sync_task(void *params)
 
 		memcpy(pos, sync_params, sizeof(sync_params));
 		memcpy(&pos[24], best_master_addr.addr, 6);
+		// memcpy(&pos[32])
+		*((uint32_t *) &pos[24]) = (uint32_t) (current_aw_seqnum & 0xffffffff) + 1;
 		pos += sizeof(sync_params);
+		pos += add_chlist(pos);
+		memcpy(pos, "\x00\x00", 2);
+		pos += 2;
+
+		memcpy(pos, elec_params, sizeof(elec_params));
+		memcpy(&pos[8], best_master_addr.addr, 6);
+		pos += sizeof(elec_params);
 
 		memcpy(pos, chseq_params, sizeof(chseq_params));
-		for (int i = 0; i < 16; i++) {
-			pos[9+i*2] = 0x06;
-			pos[9+i*2+1] = 0x51;
-		}
 		pos += sizeof(chseq_params);
+		pos += add_chlist(pos);
+		memcpy(pos, "\x00\x00\x00", 3);
+		pos += 3;
 
-		ESP_ERROR_CHECK(esp_wifi_80211_tx(WIFI_IF_AP, buf, pos-buf, true)); // try true for now?
+		memcpy(pos, version_params, sizeof(version_params));
+		pos += sizeof(version_params);
+
+		if (iter % 10 == 0) {
+			printf("sending PSF for master: ");
+			print_mac(best_master_addr);
+			printf("\n");
+		}
+		ESP_ERROR_CHECK(esp_wifi_80211_tx(WIFI_IF_AP, buf, pos-buf, false));
+
+		// ping ff02::1
+		pos = buf;
+		memcpy(pos, wlan_hdr, sizeof(wlan_hdr));
+		memcpy(&pos[4], "\x33\x33\x00\x00\x00\x01", 6); // dst (ipv6 mcast)
+		memcpy(&pos[10], mac_bytes, 6); // src
+		pos += sizeof(wlan_hdr);
+		memcpy(pos, llc_hdr, sizeof(llc_hdr));
+		pos += sizeof(llc_hdr);
+		memcpy(pos, awdl_hdr, sizeof(awdl_hdr));
+		pos += sizeof(awdl_hdr);
+		memcpy(pos, ping_pkt, sizeof(ping_pkt));
+		pos += sizeof(ping_pkt);
+		ESP_ERROR_CHECK(esp_wifi_80211_tx(WIFI_IF_AP, buf, pos-buf, false));
 
 done:
-		DELAY(1000);
+		iter++;
+		DELAY(100);
 	}
 }
 
@@ -745,7 +827,7 @@ awdl_init()
 
     printf("initializing promiscuous mode\n");
     wifi_promiscuous_filter_t promisc_filter = {
-    	.filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT,
+    	.filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT | WIFI_PROMIS_FILTER_MASK_DATA,
     };
     ESP_ERROR_CHECK(esp_wifi_set_promiscuous_filter(&promisc_filter));
     ESP_ERROR_CHECK(esp_wifi_set_promiscuous_rx_cb(wifi_pkt_handler));

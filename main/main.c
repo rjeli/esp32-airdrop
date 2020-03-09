@@ -49,6 +49,7 @@ awdl_handler(void *handler_arg, esp_event_base_t base, int32_t evt, void *evt_da
 {
 	switch (evt) {
 	ENUMCASEO(AWDL_FOUND_AIRDROP);
+		/*
 		xSemaphoreTake(https_mtx, portMAX_DELAY);
 		if (!started_https) {
 			awdl_airdrop_addr_t *addr = evt_data;
@@ -58,6 +59,7 @@ awdl_handler(void *handler_arg, esp_event_base_t base, int32_t evt, void *evt_da
 			started_https = 1;
 		}
 		xSemaphoreGive(https_mtx);
+		*/
 		break;
 	ENUMDEFAULT(evt);
 	}
@@ -99,7 +101,7 @@ app_main()
     printf("%dMB %s flash\n", spi_flash_get_chip_size() / (1024 * 1024),
             (chip_info.features & CHIP_FEATURE_EMB_FLASH) ? "embedded" : "external");
 
-    run_tests();
+    // run_tests();
 
 	https_mtx = xSemaphoreCreateMutex();
 
